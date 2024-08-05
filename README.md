@@ -5,7 +5,7 @@ and receiver modules should be compatible with light modification.
 
 *Thise code is presented AS-IS without warranty. Use at your own risk.*
 
-[An Aruino Nano on a breadboard with a KY-032 module pointed at a series 2 holocron.](images/device_setup.jpg)
+![An Aruino Nano on a breadboard with a KY-032 module pointed at a series 2 holocron.](images/device_setup.jpg)
 
 ## A Work In Progress
 This code is very much a work in progress. Features may be buggy or missing altogether. Questionable choices in
