@@ -1,4 +1,4 @@
-/* Holocron Toolbox v0.01 : ruthsarian@gmail.com
+/* Holocron Toolbox v0.03 : ruthsarian@gmail.com
  * A project to interact with holocrons from Galaxy's Edge.
  * 
  * This code was developed with an Arduino Nano and a KY-032
@@ -17,20 +17,12 @@
  *  the base of the holocron.
  * 
  * TODO
- *  - if no holocron is "seen", button press puts its into jedi mode (for pairing with sith)
- *  - way to behave as s1 or s2 holocron
- *
+ *  - Better serial messages about what button presses do
  *
  * NOTES
- *  - when in S1_JEDI_IDEL it will pair with JEDI'd S2 SITH only afer coming out of JEDI mode
- *    am i missing some part of that authentication?
- *  - does not pair with S2 SITH in SITH mode
- *  - all signs point to me not understanding the JEDI side of JEDI-SITH S2 comms
+ *  - getting good alignment with SITH holocrons is making life difficult
+ *    the pairing code is fine, i just need to get better alignment with SITH holocrons
  *
- *
- *
- *
- * 
  */
 
 // Hardware setup
@@ -44,7 +36,7 @@
 #define S1_PERIOD             2000    // uS
 #define S1_ACTIVE_ZERO        500     // uS
 #define S1_BIT_COUNT          8       
-#define S1_TIME_PER_BEACON    30      // mS
+#define S1_TIME_PER_BEACON    40      // mS
 #define S2_PERIOD             1125    // uS
 #define S2_ACTIVE_ZERO        350     // uS
 #define S2_BIT_COUNT          12 
@@ -103,6 +95,8 @@ enum holocron_states {
   S2_JEDI_IDLE,
   S1_JEDI_PAIRED_TO_SITH,
   S2_JEDI_PAIRED_TO_SITH,
+  START_FORCE_DISCONNECT,
+  FORCE_DISCONNECT,
   NUM_STATES
 };
 
@@ -323,7 +317,8 @@ void loop() {
         // this is a series 2 jedi holocron
         if (data == JEDI_S2_BEACON) {
           Serial.println("Series 2 JEDI Holocron Found!");
-          Serial.println("  Press button to pair.");
+          Serial.println("  Short button press to pair.");
+          Serial.println("  Long button press to swap to series 1 JEDI mode.");
           current_state = S2_JEDI_FOUND;
 
         // this is a series 1 jedi holocron
@@ -340,17 +335,26 @@ void loop() {
         break;
 
       case S1_JEDI_FOUND:
-        if (button_press()) {
+
+        btn = button_press();
+        if (btn == SHORT_BUTTON_PRESS) {
           Serial.println("  Pairing...");
           current_state = S1_JEDI_PAIRING;
+        } else if (btn == LONG_BUTTON_PRESS) {
+          Serial.println("  Treating JEDI holocron as Series 2");
+          current_state = S2_JEDI_FOUND;
         }
         last_recv_time = millis();
         break;
 
       case S2_JEDI_FOUND:
-        if (button_press()) {
+        btn = button_press();
+        if (btn == SHORT_BUTTON_PRESS) {
           Serial.println("  Pairing...");
           current_state = S2_JEDI_PAIRING;
+        } else if (btn == LONG_BUTTON_PRESS) {
+          Serial.println("  Treating JEDI holocron as Series 1");
+          current_state = S1_JEDI_FOUND;
         }
         last_recv_time = millis();
         break;
@@ -358,21 +362,24 @@ void loop() {
       case S1_JEDI_PAIRING:
         send_data(SITH_S1_HELLO, SERIES_ONE);
         current_state = S1_PAIRED;
-        Serial.println("  Paired.");
+        //Serial.println("  Paired.");
         break;
 
       case S2_JEDI_PAIRING:
         if (data == JEDI_S2_BEACON) {
           send_data(SITH_S2_ACK, SERIES_TWO);
           current_state = S2_PAIRED;
-          Serial.println("  Paired.");
+          //Serial.println("  Paired.");
         }
         break;
 
       // paired
       case S1_PAIRED:
-        if (button_press()) {
+        btn = button_press();
+        if (btn == SHORT_BUTTON_PRESS) {
           send_data(SITH_S1_BUTTON, SERIES_ONE);
+        } else if (btn == LONG_BUTTON_PRESS) {
+          current_state = START_FORCE_DISCONNECT;
         } else if (   
                data == JEDI_S1_BRIGHT
             || data == JEDI_S1_DARK
@@ -388,9 +395,11 @@ void loop() {
         break;
 
       case S2_PAIRED:
-        if (button_press()) {
+        btn = button_press();
+        if (btn == SHORT_BUTTON_PRESS) {
           send_data(SITH_S2_BUTTON, SERIES_TWO);
-          current_state = S2_BUTTON_SEND1;
+        } else if (btn == LONG_BUTTON_PRESS) {
+          current_state = START_FORCE_DISCONNECT;
         } else if (   
                data == JEDI_S2_BEACON
             || data == JEDI_S2_PING
@@ -495,6 +504,10 @@ void loop() {
         }
         break;
 
+      case FORCE_DISCONNECT:
+        last_recv_time = millis();
+        break;
+
       default:
         Serial.println("  Reset");
         current_state = SITH_IDLE;
@@ -549,13 +562,14 @@ void loop() {
           current_state = START;
         }
 
+        // start timer
         // send an S1 beacon out 
-        // wait S1_TIME_PER_BEACON
+        // wait until S1_TIME_PER_BEACON
         // repeat
 
         if (last_send_time + S1_TIME_PER_BEACON < millis()) {
-          send_data(JEDI_S1_BEACON, SERIES_ONE);
           last_send_time = millis();
+          send_data(JEDI_S1_BEACON, SERIES_ONE);
         }
         break;
 
@@ -637,6 +651,19 @@ void loop() {
         // TODO: handle sith buttons?
         // TODO: animations?????
         //
+        break;
+
+      case START_FORCE_DISCONNECT:
+        last_send_time = 0;
+        current_state = FORCE_DISCONNECT;
+
+      case FORCE_DISCONNECT:
+        if (last_send_time == 0) {
+          Serial.println("Disconnecting...");
+          last_send_time = millis();
+        } else if (last_send_time + CONNECT_TIMEOUT < millis()) {
+          last_recv_time = 1;
+        }
         break;
 
       default:
