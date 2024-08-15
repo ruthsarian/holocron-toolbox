@@ -5,10 +5,31 @@
  * "obstacle avoidance" module, which has an IR transmitter and receiver.
  * However it should be possible to get this code working with just about any
  * device that is supported by Arduino IDE.
+ *
+ * ORIENTATION: JEDI Holocron
+ *  When communicating with a JEDI holocron, the JEDI holocron should have its USB port side facing away from you, with 
+ *  the USB port edge of the USB port side being the edge closest (touch) the table it's sitting on. In this orientation,
+ *  aim the IR sensor towards the left side of the holocron.
+ *
+ * ORIENTATION: SITH Holocron
+ *  The bottom of the holocron should face towards the IR sensor with the IR sensor aimed at the edge of the
+ *  bottom of the holocron that has the USB port on the other side of the holocron that shares an edge with
+ *  the base of the holocron.
  * 
  * TODO
  *  - if no holocron is "seen", button press puts its into jedi mode (for pairing with sith)
  *  - way to behave as s1 or s2 holocron
+ *
+ *
+ * NOTES
+ *  - when in S1_JEDI_IDEL it will pair with JEDI'd S2 SITH only afer coming out of JEDI mode
+ *    am i missing some part of that authentication?
+ *  - does not pair with S2 SITH in SITH mode
+ *  - all signs point to me not understanding the JEDI side of JEDI-SITH S2 comms
+ *
+ *
+ *
+ *
  * 
  */
 
@@ -19,17 +40,18 @@
 #define IR_BUTTON_PIN         5
 
 // Holcron signal timings, all in microseconds
-#define PREAMBLE_ACTIVE       4400
-#define S1_PERIOD             2000
-#define S1_ACTIVE_ZERO        500 
-#define S1_BIT_COUNT          8
-#define S1_TIME_PER_BEACON    30
-#define S2_PERIOD             1125
-#define S2_ACTIVE_ZERO        350
-#define S2_BIT_COUNT          12
-#define S2_TIME_PER_BEACON    150
-#define MAX_BIT_DURATION      3000    // limit how long an inactive duration can be before data is reset
-#define CONNECT_TIMEOUT       5000
+#define PREAMBLE_ACTIVE       4400    // uS
+#define S1_PERIOD             2000    // uS
+#define S1_ACTIVE_ZERO        500     // uS
+#define S1_BIT_COUNT          8       
+#define S1_TIME_PER_BEACON    30      // mS
+#define S2_PERIOD             1125    // uS
+#define S2_ACTIVE_ZERO        350     // uS
+#define S2_BIT_COUNT          12 
+#define S2_TIME_TO_S1_BEACON  50      // mS
+#define S2_TIME_TO_S2_BEACON  150     // mS
+#define MAX_BIT_DURATION      3000    // uS; limit how long an inactive duration can be before data is reset
+#define CONNECT_TIMEOUT       5000    // mS
 
 // Jedi Holcron commands
 #define JEDI_S1_BRIGHT        0x96
@@ -39,7 +61,7 @@
 #define JEDI_S1_FLASH         0xD2
 #define JEDI_S1_LIGHTS_OFF    0xE1
 #define JEDI_S1_BEACON        0xF0
-#define JEDI_S2_BEACON        0x00
+#define JEDI_S2_BEACON        0x000
 #define JEDI_S2_PING          0x044
 #define JEDI_S2_DARK          0x055
 #define JEDI_S2_LIGHT         0x066
@@ -64,8 +86,8 @@
 // state machine
 enum holocron_states {
   START,
-  IDLE,
-  BEACON_FOUND,
+  SITH_IDLE,
+  JEDI_BEACON_FOUND,
   S1_JEDI_FOUND,
   S2_JEDI_FOUND,
   S1_JEDI_PAIRING,
@@ -264,6 +286,7 @@ void loop() {
   static unsigned long last_recv_time = 0;
   static unsigned long last_send_time = 0;
   static holocron_states current_state = START;
+  static unsigned char step = 0;  // purposely generic name; may be resused for multiple purposes
 
   // have we received any messages??
   data = get_ir_data();
@@ -275,17 +298,27 @@ void loop() {
 //    Serial.print(" ");
 //    } if (false) {
 
+
+    /* TODO
+     * should 'last_recv_time = millis();' come before the switch {} block rather
+     * than manually doing this inside EVERY case block?
+     * probably...
+     *
+     * we're using last_recv_time to track how long its been since we last received a packet, 
+     * so we know when the holocron we're paired/pairing with has left.
+     */
+
     switch (current_state) {
 
-      // looking for a S2 JEDI holocron - step 1
-      case IDLE:
+      // looking for a S2 JEDI holocron - part 1
+      case SITH_IDLE:
         if (data == JEDI_S1_BEACON) {
-          current_state = BEACON_FOUND;
+          current_state = JEDI_BEACON_FOUND;
         }
         break;
 
-      // looking for a S2 JEDI holocron - step 2
-      case BEACON_FOUND:
+      // looking for a S2 JEDI holocron - part 2
+      case JEDI_BEACON_FOUND:
 
         // this is a series 2 jedi holocron
         if (data == JEDI_S2_BEACON) {
@@ -302,7 +335,7 @@ void loop() {
 
         // don't know what this is, reset.
         else  {
-          current_state = IDLE;
+          current_state = SITH_IDLE;
         }
         break;
 
@@ -311,6 +344,7 @@ void loop() {
           Serial.println("  Pairing...");
           current_state = S1_JEDI_PAIRING;
         }
+        last_recv_time = millis();
         break;
 
       case S2_JEDI_FOUND:
@@ -318,6 +352,7 @@ void loop() {
           Serial.println("  Pairing...");
           current_state = S2_JEDI_PAIRING;
         }
+        last_recv_time = millis();
         break;
 
       case S1_JEDI_PAIRING:
@@ -353,7 +388,6 @@ void loop() {
         break;
 
       case S2_PAIRED:
-
         if (button_press()) {
           send_data(SITH_S2_BUTTON, SERIES_TWO);
           current_state = S2_BUTTON_SEND1;
@@ -384,11 +418,68 @@ void loop() {
         }
         break;
 
+
+      /* How S2 Jedi Pairs With S2 Sith
+       *
+       * S2_JEDI sends out its beacons:
+       *   0x000 (S2 packet)
+       *   wait 30ms
+       *   0xF0  (S1 packet)
+       *   wait 80ms
+       *   repeat until we get a sith response after 0x000
+       *
+       * S2_SITH responsds to S2_JEDI beacon:
+       *  S2_JEDI: 0x000
+       *  S2_SITH: 0x880
+       *  S2_JEDI: 0xB4     time between both jedi packets is same 30ms window; we're keeping the same xmit timing as the S2_JEDI 
+       *                    idle, we just change the second packet from 0xF0 to 0xB4
+       *  wait 80ms
+       *  
+       * S2_JEDI and S2_SITH negotiate (i think this is used to detect S2 in S1 mode??)
+       *  S2_JEDI: 0x044    once S2_JEDI 'sees' an S2_SITH reponse, S2_JEDI sends out 0x044 instead of 0x000
+       *  S2_SITH: 0x880
+       *  S2_JEDI: 0xB4     still same timing pattern, 
+       *  wait 80ms
+       *  repeat this pattern 3 more times (total of 4), if pattern breaks, we try to renegotiate
+       *
+       * S2_JEDI paired with S2_SITH
+       *  S2_JEDI: 0x044    50 ms between S2_JEDI packets
+       *  S2_SITH: 0x880
+       *  repeat until we lose contact  
+       *
+       *  So how do I code this?
+       *  I think in S2_JEDI_IDLE I start a timer before I send the first packet.
+       *  I use a variable to keep track of which packets I've sent so I can send the next packet out as expected
+       *  Before sending a packet, check to see if we received an S2 response. If we did it should alter the
+       *  state variable used to track which packets have gone out (and been received). And the sent packet changes
+       *  based on this state value
+       *
+       */
+
+
+      /* what is the 'step' variable?
+       * for S2_JEDI mode, it tracks where we are in the pairing process
+       * the 2 least significant bits track where we are in the repeated beacon sending process
+       * the rest of the bits track how many times we've gone through the pairing process before
+       * we're considered to be paired.
+       *
+       * TODO: consider using defines or macros to make the purpose of the bitwise operations obvious
+       */
+
       case S2_JEDI_IDLE:
+        // we have an S2_SITH ACK packet
         if (data == SITH_S2_ACK) {
-          Serial.println("  Paired.");
+
+          // first time seeing it? generate a debug message
+          if ((step >> 2) == 0) {
+            Serial.println("Pairing...");
+          }
+
+          // record that we received a packet
           last_recv_time = millis();
-          current_state = S2_JEDI_PAIRED_TO_SITH;
+
+          // record that we've received an S2_ACK to the step variable
+          step = step + (1 << 2);
         }
         break;
 
@@ -406,7 +497,7 @@ void loop() {
 
       default:
         Serial.println("  Reset");
-        current_state = IDLE;
+        current_state = SITH_IDLE;
         last_recv_time = 0;
         break;
     } 
@@ -416,13 +507,13 @@ void loop() {
     switch (current_state) {
 
       case START:
-        Serial.println("Searching for Jedi holocrons.");
+        Serial.println("Waiting for a Jedi holocron.");
         last_send_time = 0;
         last_recv_time = 0;
-        current_state = IDLE;
+        current_state = SITH_IDLE;
         break;
 
-      case IDLE:
+      case SITH_IDLE:
         btn = button_press();
 
         // series 1 jedi
@@ -447,6 +538,7 @@ void loop() {
         Serial.println();
         Serial.println("Waiting for Series 2 Sith holocrons");
         current_state = S2_JEDI_IDLE;
+        step = 0;
         break;
 
       // behave like a series 1 Jedi holocron
@@ -470,25 +562,43 @@ void loop() {
       // behave like a series 2 Jedi holocron
       case S2_JEDI_IDLE:
 
+        // exit out of Jedi mode if button is pressed
         if (button_press()) {
           Serial.println("  Resetting...");
           current_state = START;
         }
 
-        // send an S2 beacon
-        // wait S1_TIME_PER_BEACON, 
-        // send S1 beacon
-        // wait however much time is left from start to S2_TIME_PER_BEACON
-        // repeat
+        // after 4 continous sith acks, we are paired.
+        // TODO: what if we are pairing and we do not get a S2 SITH ACK?
+        //       probably need to reset the step variable
+        if ((step >> 2) > 4) {
+          Serial.println("  Paired.");
+          current_state = S2_JEDI_PAIRED_TO_SITH;
 
-        // start a new beacon sequence
-        if (last_send_time + S2_TIME_PER_BEACON < millis()) {
+        // start sending S2_JEDI beacon by sending JEDI_S2_BEACON
+        } else if ((step & 1) == 0 && (last_send_time + S2_TIME_TO_S2_BEACON) < millis()) {
+
+          // start the timer
           last_send_time = millis();
-          send_data(JEDI_S1_BEACON, SERIES_ONE);
 
-        // send the second beacon sequence
-        } else if (last_send_time + (S2_PERIOD * S1_BIT_COUNT) + S1_TIME_PER_BEACON < millis()) {
-          send_data(JEDI_S2_BEACON, SERIES_ONE);
+          // which packet do we send?
+          if ((step >> 2) == 0) {
+            send_data(JEDI_S2_BEACON, SERIES_TWO);
+          } else {
+            send_data(JEDI_S2_PING, SERIES_TWO);
+          }
+          step++;
+
+        // send JEDI_S1_BEACON 50ms later
+        } else if ((step & 1) && (last_send_time + S2_TIME_TO_S1_BEACON) < millis()) {
+
+          // which packet do we send?
+          if ((step >> 2) == 0) {
+            send_data(JEDI_S1_BEACON, SERIES_ONE);
+          } else {
+            send_data(JEDI_S1_PING, SERIES_ONE);
+          }
+          step = step & 0xFFE;  // reset least significant bit
         }
         break;
 
@@ -517,10 +627,16 @@ void loop() {
         // wait S1_TIME_PER_BEACON
         // repeat
 
-        if (last_send_time + S1_TIME_PER_BEACON < millis()) {
-          send_data(JEDI_S2_PING, SERIES_ONE);
+        if (last_send_time + S2_TIME_TO_S1_BEACON < millis()) {
           last_send_time = millis();
+          send_data(JEDI_S2_PING, SERIES_TWO);
         }
+
+        //
+        // TODO: handle button presses?
+        // TODO: handle sith buttons?
+        // TODO: animations?????
+        //
         break;
 
       default:
@@ -533,6 +649,9 @@ void loop() {
 
     // reset time monitors
     last_recv_time = 0;
+
+    // reset step variable
+    step = 0;
 
     // reset to an appropriate state
     switch (current_state) {
