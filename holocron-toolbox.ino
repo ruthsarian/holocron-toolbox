@@ -1,35 +1,69 @@
-/* Holocron Toolbox v0.03 : ruthsarian@gmail.com
+/* Holocron Toolbox v0.04 : ruthsarian@gmail.com
  * A project to interact with holocrons from Galaxy's Edge.
  * 
- * This code was developed with an Arduino Nano and a KY-032
- * "obstacle avoidance" module, which has an IR transmitter and receiver.
- * However it should be possible to get this code working with just about any
- * device that is supported by Arduino IDE.
+ * This code was developed with an Arduino Nano and a KY-032 "obstacle avoidance" module, which has an IR transmitter 
+ * and receiver. However it should be possible to get this code working with just about any device that is supported 
+ * by Arduino IDE.
  *
  * ORIENTATION: JEDI Holocron
- *  When communicating with a JEDI holocron, the JEDI holocron should have its USB port side facing away from you, with 
- *  the USB port edge of the USB port side being the edge closest (touch) the table it's sitting on. In this orientation,
- *  aim the IR sensor towards the left side of the holocron.
+ *  When communicating with a JEDI holocron, the JEDI holocron should have its USB port side facing away from you, with
+ *  the USB port edge of the USB port side being the edge closest (touch) the table it's sitting on. In this
+ *  orientation, aim the IR sensor towards the left side of the holocron.
  *
  * ORIENTATION: SITH Holocron
- *  The bottom of the holocron should face towards the IR sensor with the IR sensor aimed at the edge of the
- *  bottom of the holocron that has the USB port on the other side of the holocron that shares an edge with
- *  the base of the holocron.
+ *  The bottom of the holocron should face towards the IR sensor with the IR sensor aimed at the edge of the bottom of 
+ *  the holocron that has the USB port on the other side of the holocron that shares an edge with the base of the 
+ *  holocron.
  * 
  * TODO
  *  - Better serial messages about what button presses do
+ *  - Do I just ditch my send/recv code and use IRremote for everything?
  *
  * NOTES
- *  - getting good alignment with SITH holocrons is making life difficult
- *    the pairing code is fine, i just need to get better alignment with SITH holocrons
+ *  - getting good alignment with SITH holocrons is making life difficult the pairing code is fine, i just need to get
+ *    better alignment with SITH holocrons
  *
  */
+#include <Arduino.h>
 
 // Hardware setup
 #define IR_SEND_PIN           3
 #define IR_RECV_PIN           2
 #define IR_RECV_ACTIVE_STATE  LOW
 #define IR_BUTTON_PIN         5
+
+//#define USE_IRREMOTE_LIB   // uncomment this line to use the Arduino-IRremote library
+                           // https://github.com/Arduino-IRremote/Arduino-IRremote/
+
+/* Should you use the Arduino-IRremote library? 
+ *   This is needed for transmitting commands with just an IR LED. If you have the KY-032 module (or something similar 
+ *   that generates the 38kHz carrier wave) then you do NOT need the Arduino-IRremote library.
+ *
+ * Hardware vs Software Timer
+ *   IRremote will generate the carrier signal in software unless you define SEND_PWM_BY_TIMER. If that is defined,
+ *   a built-in timer of your microcontroller will be used. The hardware timer will be much more accurate and reduce 
+ *   processing overhead. If you're having problems with getting a good carrier signal, this option may be the way 
+ *   to go. However, you are limited to specific pins on your microcontroller that can interface with a hardware timer.
+ *   Consult the library's documentation on its github repository or look at an IRremote demo to learn more.
+ *
+ * IRremote & Ky-032
+ *   If USE_NO_SEND_PWM and USE_ACTIVE_HIGH_OUTPUT_FOR_SEND_PIN are defined then the IRremote library will work
+ *   with the KY-032 module.
+ */
+
+#ifdef USE_IRREMOTE_LIB
+  #if !defined(ARDUINO_ESP32C3_DEV)   // This is due to a bug in RISC-V compiler, which requires unused function sections :-(.
+    #define DISABLE_CODE_FOR_RECEIVER // Disables static receiver code like receive timer ISR handler and static IRReceiver and irparams data. Saves 450 bytes program memory and 269 bytes RAM if receiving functions are not required.
+  #endif
+
+  // compile options; see: https://github.com/Arduino-IRremote/Arduino-IRremote/blob/master/README.md#compile-options--macros-for-this-library
+
+  #define NO_LED_FEEDBACK_CODE                  // saves some program space
+  //#define SEND_PWM_BY_TIMER                     // Disable carrier PWM generation in software and use (restricted) hardware PWM.
+  //#define USE_NO_SEND_PWM                       // Use no carrier PWM; cannot be defined if SEND_PWM_BY_TIMER is defined
+  //#define USE_ACTIVE_HIGH_OUTPUT_FOR_SEND_PIN   // When sending data, use HIGH as the active signal; this is needed for the KY-032 module
+  #include <IRremote.hpp>
+#endif
 
 // Holcron signal timings, all in microseconds
 #define PREAMBLE_ACTIVE       4400    // uS
@@ -173,52 +207,90 @@ short get_ir_data() {
   return(NO_DATA);
 }
 
-void send_data(unsigned short data, uint8_t holocron_series) {
-  unsigned char bit_out, bit_count;
-  unsigned long next;
-  unsigned short inactive, period, active_zero;
-  
-  // set certain timing values based on which series holocron it is
-  if (holocron_series == SERIES_ONE) {
-    period = S1_PERIOD;
-    bit_count = S1_BIT_COUNT;
-    active_zero = S1_ACTIVE_ZERO;
-  } else {
-    period = S2_PERIOD;
-    bit_count = S2_BIT_COUNT;
-    active_zero = S2_ACTIVE_ZERO;
+/* there's probably a much better way to do this; #define macros maybe, but
+ * for now, if USE_IRREMOTE_LIB is defined, use this version of send_data(), if not,
+ * use the other version of send_data(). as long as both versions take the same
+ * parameters it'll be fine.
+ */
+#ifdef USE_IRREMOTE_LIB
+  #define HOLOCRON_CARRIER_FREQ 38    // in kHz
+  #define SIG_BUF_LEN           25    // 1 + (2 * bits in signal); series 1 has 8 bits, series 2 has 12 bits, so allocate enough for 12 bits
+
+  // convert a holocron signal byte value to an array of timing values used by IRremote
+  void byte_to_IRremote_signal(unsigned short data, uint8_t bit_count, uint16_t *sig) {
+
+    // first value is the preamble
+    sig[0] = PREAMBLE_ACTIVE;
+
+    // now add 2 values for each bit of the byte being considered
+    for(uint8_t i=0; i<bit_count; i++) {
+      if ((data >> (bit_count - 1 - i)) & 1) {
+        sig[1 + (2*i)] = (bit_count == 12 ? S2_ACTIVE_ZERO : S1_ACTIVE_ZERO);                          // 500
+        sig[2 + (2*i)] = (bit_count == 12 ? S2_PERIOD - S2_ACTIVE_ZERO : S1_PERIOD - S1_ACTIVE_ZERO);  // 1500
+      } else {
+        sig[1 + (2*i)] = (bit_count == 12 ? S2_PERIOD - S2_ACTIVE_ZERO : S1_PERIOD - S1_ACTIVE_ZERO);  // 1500
+        sig[2 + (2*i)] = (bit_count == 12 ? S2_ACTIVE_ZERO : S1_ACTIVE_ZERO);                          // 500
+      }
+    }
   }
 
-  // send the preamble
-  digitalWrite(IR_SEND_PIN, HIGH);
-  next = micros() + PREAMBLE_ACTIVE;
-  while (micros() < next) {;}
-  digitalWrite(IR_SEND_PIN, LOW);
+  // convert the signal to an array of microsecond timings values for use with IrSender.sendRaw()
+  void send_data(unsigned short data, uint8_t holocron_series) {
+    uint16_t sig[SIG_BUF_LEN];
+    uint8_t bit_count = (holocron_series == SERIES_TWO ? 12 : 8);
+    byte_to_IRremote_signal(data, bit_count, sig);
+    IrSender.sendRaw(sig, (bit_count * 2) + 1, HOLOCRON_CARRIER_FREQ);
+  }
 
-  // send the data
-  while (bit_count--) {
+#else // if USE_IRREMOTE_LIB is undefined
 
-    // get the outgoing bit
-    bit_out = (data >> bit_count) & 1;
-   
-    // sending a 1
-    if (bit_out) {
-      inactive = active_zero;
-
-    // sending a 0
+  void send_data(unsigned short data, uint8_t holocron_series) {
+    unsigned char bit_out, bit_count;
+    unsigned long next;
+    unsigned short inactive, period, active_zero;
+    
+    // set certain timing values based on which series holocron it is
+    if (holocron_series == SERIES_ONE) {
+      period = S1_PERIOD;
+      bit_count = S1_BIT_COUNT;
+      active_zero = S1_ACTIVE_ZERO;
     } else {
-      inactive = period - active_zero;
+      period = S2_PERIOD;
+      bit_count = S2_BIT_COUNT;
+      active_zero = S2_ACTIVE_ZERO;
     }
 
-    // send the bit
-    next = next + inactive;
-    while (micros() < next) {;}
+    // send the preamble
     digitalWrite(IR_SEND_PIN, HIGH);
-    next = next + period - inactive;
+    next = micros() + PREAMBLE_ACTIVE;
     while (micros() < next) {;}
     digitalWrite(IR_SEND_PIN, LOW);
+
+    // send the data
+    while (bit_count--) {
+
+      // get the outgoing bit
+      bit_out = (data >> bit_count) & 1;
+    
+      // sending a 1
+      if (bit_out) {
+        inactive = active_zero;
+
+      // sending a 0
+      } else {
+        inactive = period - active_zero;
+      }
+
+      // send the bit
+      next = next + inactive;
+      while (micros() < next) {;}
+      digitalWrite(IR_SEND_PIN, HIGH);
+      next = next + period - inactive;
+      while (micros() < next) {;}
+      digitalWrite(IR_SEND_PIN, LOW);
+    }
   }
-}
+#endif    // USE_IRREMOTE_LIB
 
 // return true on button release
 unsigned char button_press() {
@@ -263,8 +335,12 @@ void setup() {
   pinMode(IR_RECV_PIN, INPUT);
 
   // setup IR send PIN
-  pinMode(IR_SEND_PIN, OUTPUT);
-  digitalWrite(IR_SEND_PIN, LOW);
+  #ifdef USE_IRREMOTE_LIB
+    IrSender.begin();
+  #else
+    pinMode(IR_SEND_PIN, OUTPUT);
+    digitalWrite(IR_SEND_PIN, LOW);
+  #endif
 
   // setup BUTTON
   pinMode(IR_BUTTON_PIN, INPUT_PULLUP);
