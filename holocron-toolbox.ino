@@ -46,7 +46,7 @@
  *   to go. However, you are limited to specific pins on your microcontroller that can interface with a hardware timer.
  *   Consult the library's documentation on its github repository or look at an IRremote demo to learn more.
  *
- * IRremote & Ky-032
+ * IRremote & KY-032
  *   If USE_NO_SEND_PWM and USE_ACTIVE_HIGH_OUTPUT_FOR_SEND_PIN are defined then the IRremote library will work
  *   with the KY-032 module.
  */
